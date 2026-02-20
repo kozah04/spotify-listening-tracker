@@ -362,4 +362,100 @@ def get_biggest_listening_day(df: pd.DataFrame) -> dict:
         "total_minutes": best_minutes,
         "total_hours": round(best_minutes / 60, 1),
         "top_tracks": top_tracks_that_day["track"].tolist(),
+        "total_streams": int(df[df["date"] == best_date]["track"].count()),
+    }
+
+def analyze_time_of_day_listening(df: pd.DataFrame) -> dict:
+    """
+    Segments listening into time-of-day buckets and runs a one-way ANOVA
+    to test whether listening volume differs significantly across periods.
+
+    Buckets:
+        Morning   — 06:00 to 11:59
+        Afternoon — 12:00 to 17:59
+        Evening   — 18:00 to 21:59
+        Night     — 22:00 to 05:59
+
+    Args:
+        df: Cleaned streaming DataFrame.
+
+    Returns:
+        Dictionary with per-period averages, ANOVA result, and plain English summary.
+    """
+    from scipy import stats
+
+    def assign_period(hour: int) -> str:
+        if 6 <= hour < 12:
+            return "Morning"
+        elif 12 <= hour < 18:
+            return "Afternoon"
+        elif 18 <= hour < 22:
+            return "Evening"
+        else:
+            return "Night"
+
+    df = df.copy()
+    df["period"] = df["hour"].apply(assign_period)
+
+    # Daily minutes per period
+    daily_period = (
+        df.groupby(["date", "period"])["minutes_played"]
+        .sum()
+        .reset_index()
+    )
+
+    period_order = ["Morning", "Afternoon", "Evening", "Night"]
+    period_groups = {
+        p: daily_period[daily_period["period"] == p]["minutes_played"]
+        for p in period_order
+    }
+
+    period_avgs = {
+        p: round(group.mean(), 1)
+        for p, group in period_groups.items()
+        if len(group) > 0
+    }
+
+    # One-way ANOVA across all four groups — requires at least 2 groups with data
+    alpha = 0.05
+    groups_for_anova = [g for g in period_groups.values() if len(g) > 1]
+
+    if len(groups_for_anova) < 2:
+        f_stat, p_value, significant = None, None, False
+    else:
+        f_stat, p_value = stats.f_oneway(*groups_for_anova)
+        f_stat = round(f_stat, 4)
+        p_value = round(p_value, 4)
+        significant = p_value < alpha
+
+    dominant_period = max(period_avgs, key=period_avgs.get)
+    dominant_avg = period_avgs[dominant_period]
+    alpha = 0.05
+    significant = p_value < alpha
+
+    period_emojis = {
+        "Morning": "🌅",
+        "Afternoon": "☀️",
+        "Evening": "🌆",
+        "Night": "🌙",
+    }
+
+    return {
+        "period_avgs": period_avgs,
+        "dominant_period": dominant_period,
+        "dominant_emoji": period_emojis.get(dominant_period, ""),
+        "f_statistic": f_stat,
+        "p_value": p_value,
+        "significant": significant,
+        "period_order": period_order,
+        "interpretation": (
+            f"You are most active during the {dominant_period.lower()}, "
+            f"averaging {dominant_avg} minutes per day during that period. "
+            + (
+                "This pattern is statistically significant — it reflects a genuine habit, not just random variation."
+                if significant else
+                "However, the difference across periods is not statistically significant, "
+                "meaning your listening is fairly spread throughout the day."
+            )
+        ),
     }

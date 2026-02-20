@@ -9,29 +9,36 @@ from src.analysis import (
     get_monthly_breakdown,
     get_artist_loyalty_timeline,
     get_biggest_listening_day,
+    analyze_time_of_day_listening,
 )
 
 @pytest.fixture
 def sample_df():
     return pd.DataFrame({
         "timestamp": pd.to_datetime([
-            "2024-01-13T14:00:00Z",  # Saturday
-            "2024-01-13T15:00:00Z",  # Saturday
-            "2024-01-15T09:00:00Z",  # Monday
-            "2024-01-15T10:00:00Z",  # Monday
-            "2024-01-16T11:00:00Z",  # Tuesday
+            "2024-01-13T08:00:00Z",  # Saturday - Morning
+            "2024-01-13T14:00:00Z",  # Saturday - Afternoon
+            "2024-01-13T19:00:00Z",  # Saturday - Evening
+            "2024-01-13T23:00:00Z",  # Saturday - Night
+            "2024-01-15T09:00:00Z",  # Monday - Morning
+            "2024-01-15T13:00:00Z",  # Monday - Afternoon
+            "2024-01-15T20:00:00Z",  # Monday - Evening
+            "2024-01-16T01:00:00Z",  # Tuesday - Night
         ], utc=True),
-        "track": ["Track A", "Track B", "Track A", "Track C", "Track B"],
-        "artist": ["Artist X", "Artist X", "Artist Y", "Artist Y", "Artist X"],
-        "album": ["Album 1", "Album 1", "Album 2", "Album 2", "Album 1"],
-        "minutes_played": [3.5, 4.0, 2.0, 3.0, 4.5],
-        "skipped": [False, True, False, False, True],
-        "year": [2024, 2024, 2024, 2024, 2024],
-        "month_name": ["January"] * 5,
-        "day_of_week": ["Saturday", "Saturday", "Monday", "Monday", "Tuesday"],
-        "hour": [14, 15, 9, 10, 11],
-        "date": pd.to_datetime(["2024-01-13", "2024-01-13", "2024-01-15", "2024-01-15", "2024-01-16"]).date,
-        "platform_category": ["mobile", "mobile", "desktop", "desktop", "mobile"],
+        "track": ["Track A", "Track B", "Track A", "Track C", "Track B", "Track A", "Track C", "Track B"],
+        "artist": ["Artist X", "Artist X", "Artist Y", "Artist Y", "Artist X", "Artist Y", "Artist X", "Artist Y"],
+        "album": ["Album 1", "Album 1", "Album 2", "Album 2", "Album 1", "Album 2", "Album 1", "Album 2"],
+        "minutes_played": [3.5, 4.0, 2.0, 3.0, 4.5, 2.5, 3.5, 4.0],
+        "skipped": [False, True, False, False, True, False, False, True],
+        "year": [2024] * 8,
+        "month_name": ["January"] * 8,
+        "day_of_week": ["Saturday", "Saturday", "Saturday", "Saturday", "Monday", "Monday", "Monday", "Tuesday"],
+        "hour": [8, 14, 19, 23, 9, 13, 20, 1],
+        "date": pd.to_datetime([
+            "2024-01-13", "2024-01-13", "2024-01-13", "2024-01-13",
+            "2024-01-15", "2024-01-15", "2024-01-15", "2024-01-16"
+        ]).date,
+        "platform_category": ["mobile", "mobile", "desktop", "desktop", "mobile", "desktop", "mobile", "desktop"],
     })
 
 
@@ -43,8 +50,7 @@ def test_overview_stats_keys(sample_df):
 
 def test_overview_total_streams(sample_df):
     stats = get_overview_stats(sample_df)
-    assert stats["total_streams"] == 5
-
+    assert stats["total_streams"] == 8
 
 def test_get_top_items_returns_correct_n(sample_df):
     result = get_top_items(sample_df, "artist", n=2)
@@ -114,3 +120,19 @@ def test_get_listening_streaks_keys(sample_df):
 def test_get_listening_streaks_longest_positive(sample_df):
     result = get_listening_streaks(sample_df)
     assert result["longest_streak"] >= 1
+
+def test_time_of_day_keys(sample_df):
+    result = analyze_time_of_day_listening(sample_df)
+    for key in ["period_avgs", "dominant_period", "p_value", "significant", "interpretation"]:
+        assert key in result
+
+
+def test_time_of_day_dominant_is_valid_period(sample_df):
+    result = analyze_time_of_day_listening(sample_df)
+    assert result["dominant_period"] in ["Morning", "Afternoon", "Evening", "Night"]
+
+
+def test_time_of_day_p_value_range(sample_df):
+    result = analyze_time_of_day_listening(sample_df)
+    if result["p_value"] is not None:
+        assert 0.0 <= result["p_value"] <= 1.0
