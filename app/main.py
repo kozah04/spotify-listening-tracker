@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 from pathlib import Path
+from collections import Counter
 
 sys.path.append(str(Path(__file__).parent.parent))
 
@@ -24,6 +25,8 @@ from src.analysis import (
     get_artist_loyalty_timeline,
     get_biggest_listening_day,
 )
+from src.spotify_api import fetch_all_metadata, compute_listening_age
+from src.genre_map import enrich_genres_with_map, get_genre_listening_time
 
 # ── Page Config ───────────────────────────────────────────────────────────────
 
@@ -36,16 +39,39 @@ st.set_page_config(
 st.markdown("""
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap');
-
-        html, body, [class*="css"] {
-            font-family: 'Poppins', sans-serif;
-        }
+        html, body, [class*="css"] { font-family: 'Poppins', sans-serif; }
         .section-header {
             color: #1DB954;
             font-size: 1.4rem;
             font-weight: 700;
             margin-top: 2rem;
             font-family: 'Poppins', sans-serif;
+        }
+        .listening-age-card {
+            background: linear-gradient(135deg, #1DB954 0%, #191414 100%);
+            border-radius: 16px;
+            padding: 2rem;
+            text-align: center;
+            margin: 1rem 0;
+        }
+        .listening-age-card h2 {
+            color: white;
+            font-size: 1.1rem;
+            font-weight: 400;
+            margin-bottom: 0.2rem;
+            opacity: 0.85;
+        }
+        .listening-age-card h1 {
+            color: white;
+            font-size: 3rem;
+            font-weight: 700;
+            margin: 0.2rem 0;
+        }
+        .listening-age-card p {
+            color: white;
+            opacity: 0.75;
+            font-size: 0.9rem;
+            margin-top: 0.5rem;
         }
     </style>
 """, unsafe_allow_html=True)
@@ -55,24 +81,21 @@ st.markdown("""
 GREEN = "#1DB954"
 RED = "#e74c3c"
 CHART_THEME = dict(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white")
-MIN_YEAR_STREAMS = 100  # years below this are filtered from yearly charts
+MIN_YEAR_STREAMS = 100
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def hours_label(minutes: float) -> str:
-    """Converts minutes to a clean spelled-out hours string."""
     h = round(minutes / 60)
     return f"{h} hour" if h == 1 else f"{h} hours"
 
 
 def horizontal_bar(data: pd.DataFrame, x_col: str, y_col: str, y_label: str, color: str = GREEN) -> go.Figure:
-    """Renders a horizontal bar chart with spelled-out hours as labels inside bars."""
     data = data.copy()
     data["hours"] = data[x_col].apply(lambda m: round(m / 60))
     data["label"] = data[x_col].apply(hours_label)
     data = data.sort_values("hours")
-
     fig = px.bar(
         data,
         x="hours",
@@ -141,6 +164,26 @@ if st.sidebar.button("🔄 Upload New Data"):
     del st.session_state.df
     st.rerun()
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🌐 Spotify API")
+st.sidebar.caption("Fetches release dates and genres. Only calls the API once — results are cached locally.")
+
+fetch_api_data = st.sidebar.button(
+    "Fetch Track & Genre Data",
+    help="Enriches your data with song release dates and artist genres from Spotify.",
+)
+
+if fetch_api_data:
+    with st.spinner("Fetching data from Spotify API... this may take a few minutes on first run."):
+        try:
+            release_years, genres = fetch_all_metadata(df)
+            enriched_genres = enrich_genres_with_map(genres)
+            st.session_state.release_years = release_years
+            st.session_state.genres = enriched_genres
+            st.sidebar.success("Done! Scroll down to see enriched data.")
+        except Exception as e:
+            st.sidebar.error(f"API fetch failed: {e}")
+
 df_filtered = df if selected_year == "All Time" else df[df["year"] == selected_year]
 year_param = None if selected_year == "All Time" else int(selected_year)
 
@@ -177,7 +220,37 @@ col2.metric(
     help="The date range of your longest ever listening streak.",
 )
 
-# ── Section 3: Biggest Day ────────────────────────────────────────────────────
+# ── Section 3: Listening Age (API) ───────────────────────────────────────────
+
+if "release_years" in st.session_state:
+    st.markdown('<p class="section-header">🎂 Your Listening Age</p>', unsafe_allow_html=True)
+
+    age_data = compute_listening_age(df_filtered, st.session_state.release_years)
+    avg_age = age_data["avg_song_age_years"]
+    avg_year = round(age_data["avg_release_year"])
+
+    st.markdown(f"""
+        <div class="listening-age-card">
+            <h2>Your listening age is</h2>
+            <h1>{avg_age} years</h1>
+            <p>On average, the music you listen to was released around <strong>{avg_year}</strong></p>
+        </div>
+    """, unsafe_allow_html=True)
+
+    col1, col2 = st.columns(2)
+    col1.metric(
+        "Oldest Track Found",
+        f"{age_data['oldest_track']} ({age_data['oldest_year']})",
+        help=f"By {age_data['oldest_artist']} — oldest among tracks Spotify returned release data for.",
+    )
+    col2.metric(
+        "Newest Track Found",
+        f"{age_data['newest_track']} ({age_data['newest_year']})",
+        help=f"By {age_data['newest_artist']} — newest among tracks Spotify returned release data for.",
+    )
+    st.caption("Note: oldest and newest reflect only tracks with available Spotify release data, not your full history.")
+
+# ── Section 4: Biggest Day ────────────────────────────────────────────────────
 
 st.markdown('<p class="section-header">📅 Your Biggest Listening Day Ever</p>', unsafe_allow_html=True)
 
@@ -191,18 +264,15 @@ col3.metric("Total Streams", f"{best_day['total_streams']:,}", help="Number of t
 if best_day["top_tracks"]:
     st.markdown(f"**What you were playing:** {' · '.join(best_day['top_tracks'])}")
 
-# ── Section 4: Yearly Trend ───────────────────────────────────────────────────
+# ── Section 5: Yearly Trend ───────────────────────────────────────────────────
 
 if selected_year == "All Time":
     st.markdown('<p class="section-header">📈 Listening Over the Years</p>', unsafe_allow_html=True)
 
     yearly = get_yearly_trend(df_filtered)
-
-    # Filter out years with very few streams to avoid ghost columns
     year_stream_counts = df_filtered.groupby("year")["track"].count()
     valid_years = year_stream_counts[year_stream_counts >= MIN_YEAR_STREAMS].index
     yearly = yearly[yearly["year"].isin(valid_years)]
-
     yearly["year"] = yearly["year"].astype(str)
     yearly["hours"] = yearly["total_minutes"].apply(lambda m: round(m / 60))
     yearly["label"] = yearly["total_minutes"].apply(hours_label)
@@ -219,7 +289,7 @@ if selected_year == "All Time":
     fig.update_layout(**CHART_THEME, xaxis_type="category")
     st.plotly_chart(fig, use_container_width=True)
 
-# ── Section 5: Artist Loyalty Timeline ───────────────────────────────────────
+# ── Section 6: Artist Loyalty Timeline ───────────────────────────────────────
 
 if selected_year == "All Time":
     st.markdown('<p class="section-header">🎤 How Your Taste Evolved</p>', unsafe_allow_html=True)
@@ -229,7 +299,6 @@ if selected_year == "All Time":
     timeline = timeline[timeline["year"].isin(valid_years)]
     timeline["year"] = timeline["year"].astype(str)
     timeline["hours"] = timeline["total_minutes"].apply(lambda m: round(m / 60))
-    timeline["label"] = timeline["total_minutes"].apply(hours_label)
 
     fig = px.bar(
         timeline,
@@ -243,7 +312,7 @@ if selected_year == "All Time":
     fig.update_layout(**CHART_THEME, xaxis_type="category", showlegend=False)
     st.plotly_chart(fig, use_container_width=True)
 
-# ── Section 6: Monthly Breakdown ─────────────────────────────────────────────
+# ── Section 7: Monthly Breakdown ─────────────────────────────────────────────
 
 if selected_year != "All Time":
     st.markdown('<p class="section-header">📆 Month by Month</p>', unsafe_allow_html=True)
@@ -264,11 +333,13 @@ if selected_year != "All Time":
     fig.update_layout(**CHART_THEME)
     st.plotly_chart(fig, use_container_width=True)
 
-# ── Section 7: Top Artists / Tracks / Albums ─────────────────────────────────
+# ── Section 8: Top Artists / Tracks / Albums / Genres / Nigerian ─────────────
 
 st.markdown('<p class="section-header">🏆 Your Top Artists, Tracks & Albums</p>', unsafe_allow_html=True)
 
-tab1, tab2, tab3 = st.tabs(["🎤 Artists", "🎵 Tracks", "💿 Albums"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🎤 Artists", "🎵 Tracks", "💿 Albums", "🎸 Genres"
+])
 
 with tab1:
     top_artists = get_top_items(df_filtered, "artist", n=10, year=year_param)
@@ -282,7 +353,30 @@ with tab3:
     top_albums = get_top_items(df_filtered, "album", n=10, year=year_param)
     st.plotly_chart(horizontal_bar(top_albums, "total_minutes", "album", "Album"), use_container_width=True)
 
-# ── Section 8: Listening Heatmap ─────────────────────────────────────────────
+with tab4:
+    if "genres" not in st.session_state:
+        st.info("Click **Fetch Track & Genre Data** in the sidebar to load genre information.")
+    else:
+        genre_time_df = get_genre_listening_time(df_filtered, st.session_state.genres)
+
+        if genre_time_df.empty:
+            st.info("No genre data available for your listening history.")
+        else:
+            genre_time_df["label"] = genre_time_df["total_minutes"].apply(hours_label)
+            fig = px.bar(
+                genre_time_df.sort_values("total_minutes"),
+                x="total_minutes",
+                y="genre",
+                text="label",
+                orientation="h",
+                labels={"total_minutes": "Minutes Listened", "genre": "Genre"},
+                color_discrete_sequence=[GREEN],
+            )
+            fig.update_traces(textposition="inside", textfont_color="white")
+            fig.update_layout(**CHART_THEME)
+            st.plotly_chart(fig, use_container_width=True)
+
+# ── Section 9: Listening Heatmap ─────────────────────────────────────────────
 
 st.markdown('<p class="section-header">🗓️ When Do You Listen?</p>', unsafe_allow_html=True)
 st.caption("Darker green = more listening time. Hover over any cell to see exact minutes.")
@@ -299,7 +393,7 @@ fig = go.Figure(data=go.Heatmap(
 fig.update_layout(xaxis_title="Hour of Day", yaxis_title="Day of Week", **CHART_THEME)
 st.plotly_chart(fig, use_container_width=True)
 
-# ── Section 9: Skip Analysis ──────────────────────────────────────────────────
+# ── Section 10: Skip Analysis ─────────────────────────────────────────────────
 
 st.markdown('<p class="section-header">⏭️ What Do You Skip?</p>', unsafe_allow_html=True)
 st.caption(
@@ -326,14 +420,13 @@ else:
     fig.update_layout(**CHART_THEME)
     st.plotly_chart(fig, use_container_width=True)
 
-# ── Section 10: Platform Breakdown ───────────────────────────────────────────
+# ── Section 11: Platform Breakdown ───────────────────────────────────────────
 
 st.markdown('<p class="section-header">📱 Where Do You Listen?</p>', unsafe_allow_html=True)
 st.caption("Breakdown of your listening time by device type.")
 
 platform_data = get_platform_breakdown(df_filtered)
 platform_data["hours"] = platform_data["total_minutes"].apply(lambda m: round(m / 60))
-platform_data["label"] = platform_data["total_minutes"].apply(hours_label)
 
 fig = px.pie(
     platform_data,
@@ -349,7 +442,7 @@ fig.update_traces(
 fig.update_layout(paper_bgcolor="#0e1117", font_color="white")
 st.plotly_chart(fig, use_container_width=True)
 
-# ── Section 11: Weekend vs Weekday ────────────────────────────────────────────
+# ── Section 12: Weekend vs Weekday ────────────────────────────────────────────
 
 st.markdown('<p class="section-header">📊 Weekend vs Weekday Listening</p>', unsafe_allow_html=True)
 
@@ -379,7 +472,7 @@ with st.expander("🔬 Show statistical details"):
     - **p-value:** {hypothesis['p_value']} — {'less than 0.05, so this difference is real and not due to chance.' if hypothesis['significant'] else 'greater than 0.05, so this difference could just be random variation.'}
     """)
 
-# ── Section 12: Time of Day ───────────────────────────────────────────────────
+# ── Section 13: Time of Day ───────────────────────────────────────────────────
 
 st.markdown('<p class="section-header">🕐 Morning, Afternoon, Evening or Night?</p>', unsafe_allow_html=True)
 
@@ -425,7 +518,7 @@ with st.expander("🔬 Show statistical details"):
     - **p-value:** {tod['p_value']} — {'the differences are statistically significant.' if tod['significant'] else 'the differences are not statistically significant.'}
     """)
 
-# ── Section 13: Listening Personality ────────────────────────────────────────
+# ── Section 14: Listening Personality ────────────────────────────────────────
 
 st.markdown('<p class="section-header">🎭 Your Listening Personality</p>', unsafe_allow_html=True)
 

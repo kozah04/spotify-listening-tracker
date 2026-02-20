@@ -190,3 +190,64 @@ def compute_listening_age(df, track_release_years: dict) -> dict:
         "newest_artist": newest["artist"],
         "newest_year": int(newest["release_year"]),
     }
+
+import json
+from pathlib import Path
+
+CACHE_PATH = Path("data/processed/spotify_api_cache.json")
+
+
+def load_cache() -> dict:
+    """Loads cached API results from disk if available."""
+    if CACHE_PATH.exists():
+        with open(CACHE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"release_years": {}, "genres": {}}
+
+
+def save_cache(cache: dict) -> None:
+    """Saves API results to disk for reuse across sessions."""
+    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(CACHE_PATH, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2)
+
+
+def fetch_all_metadata(df, max_artists: int = 50) -> tuple[dict, dict]:
+    """
+    Master function that fetches release years and genres using cache.
+    Only calls the API for items not already in cache.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+        max_artists: Max number of artists to fetch genres for.
+                     We limit this to top artists by stream count to
+                     avoid thousands of API calls.
+
+    Returns:
+        Tuple of (release_years dict, genres dict)
+    """
+    cache = load_cache()
+    token = get_access_token()
+
+    # ── Release Years ─────────────────────────────────────────────────────────
+    all_uris = df["track_uri"].dropna().unique().tolist()
+    uncached_uris = [uri for uri in all_uris if uri not in cache["release_years"]]
+
+    if uncached_uris:
+        new_years = get_track_metadata(uncached_uris, token)
+        cache["release_years"].update(new_years)
+        save_cache(cache)
+
+    # ── Genres ────────────────────────────────────────────────────────────────
+    # Only fetch genres for top artists by stream count to keep API calls manageable
+    top_artists = (
+        df["artist"].value_counts().head(max_artists).index.tolist()
+    )
+    uncached_artists = [a for a in top_artists if a not in cache["genres"]]
+
+    if uncached_artists:
+        new_genres = get_artist_genres(uncached_artists, token)
+        cache["genres"].update(new_genres)
+        save_cache(cache)
+
+    return cache["release_years"], cache["genres"]
