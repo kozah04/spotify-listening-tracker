@@ -1,0 +1,231 @@
+import pandas as pd
+import numpy as np
+from scipy import stats
+
+
+def get_overview_stats(df: pd.DataFrame) -> dict:
+    """
+    Computes high-level listening statistics.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+
+    Returns:
+        Dictionary of summary statistics.
+    """
+    total_minutes = df["minutes_played"].sum()
+    total_hours = round(total_minutes / 60, 1)
+    total_days = round(total_minutes / 1440, 1)
+
+    return {
+        "total_hours_listened": total_hours,
+        "total_days_listened": total_days,
+        "total_streams": len(df),
+        "unique_tracks": df["track"].nunique(),
+        "unique_artists": df["artist"].nunique(),
+        "unique_albums": df["album"].nunique(),
+        "date_range_start": str(df["timestamp"].min().date()),
+        "date_range_end": str(df["timestamp"].max().date()),
+        "most_active_year": int(df["year"].value_counts().idxmax()),
+    }
+
+
+def get_top_items(df: pd.DataFrame, column: str, n: int = 10, year: int = None) -> pd.DataFrame:
+    """
+    Returns the top n artists, tracks, or albums by total minutes played.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+        column: One of 'artist', 'track', or 'album'.
+        n: Number of top items to return.
+        year: Optional year filter.
+
+    Returns:
+        DataFrame with item name and total minutes played.
+    """
+    if year:
+        df = df[df["year"] == year]
+
+    return (
+        df.groupby(column)["minutes_played"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(n)
+        .reset_index()
+        .rename(columns={"minutes_played": "total_minutes"})
+    )
+
+
+def get_hourly_heatmap_data(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Builds a pivot table of listening activity by day of week and hour.
+    Suitable for rendering as a heatmap.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+
+    Returns:
+        Pivot DataFrame with days as rows and hours as columns.
+    """
+    day_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+    heatmap = (
+        df.groupby(["day_of_week", "hour"])["minutes_played"]
+        .sum()
+        .reset_index()
+        .pivot(index="day_of_week", columns="hour", values="minutes_played")
+        .fillna(0)
+        .reindex(day_order)
+    )
+
+    return heatmap
+
+
+def get_skip_analysis(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
+    """
+    Identifies the most skipped artists by skip rate.
+    Only considers artists with at least 20 streams to avoid noise.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+        n: Number of artists to return.
+
+    Returns:
+        DataFrame with artist, total streams, skips, and skip rate.
+    """
+    artist_stats = df.groupby("artist").agg(
+        total_streams=("track", "count"),
+        total_skips=("skipped", "sum")
+    ).reset_index()
+
+    # Filter out artists with too few streams to be meaningful
+    artist_stats = artist_stats[artist_stats["total_streams"] >= 20]
+
+    artist_stats["skip_rate"] = (
+        artist_stats["total_skips"] / artist_stats["total_streams"] * 100
+    ).round(1)
+
+    return artist_stats.sort_values("skip_rate", ascending=False).head(n)
+
+
+def get_platform_breakdown(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Summarizes listening minutes and stream count by platform category.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+
+    Returns:
+        DataFrame with platform stats.
+    """
+    return (
+        df.groupby("platform_category")
+        .agg(
+            total_minutes=("minutes_played", "sum"),
+            total_streams=("track", "count")
+        )
+        .reset_index()
+        .sort_values("total_minutes", ascending=False)
+    )
+
+
+def get_yearly_trend(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Returns total minutes listened per year.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+
+    Returns:
+        DataFrame with year and total minutes.
+    """
+    return (
+        df.groupby("year")["minutes_played"]
+        .sum()
+        .reset_index()
+        .rename(columns={"minutes_played": "total_minutes"})
+    )
+
+
+def analyze_weekend_vs_weekday_listening(df: pd.DataFrame) -> dict:
+    """
+    Performs a two-sample t-test to determine whether daily listening time
+    is significantly different on weekends vs weekdays.
+
+    H0: Mean daily listening time is equal on weekdays and weekends.
+    H1: Mean daily listening time differs between weekdays and weekends.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+
+    Returns:
+        Dictionary with test results and plain English interpretation.
+    """
+    weekend_days = ["Saturday", "Sunday"]
+
+    daily = df.groupby(["date", "day_of_week"])["minutes_played"].sum().reset_index()
+    daily["is_weekend"] = daily["day_of_week"].isin(weekend_days)
+
+    weekday_listening = daily[~daily["is_weekend"]]["minutes_played"]
+    weekend_listening = daily[daily["is_weekend"]]["minutes_played"]
+
+    t_stat, p_value = stats.ttest_ind(weekend_listening, weekday_listening)
+
+    alpha = 0.05
+    significant = p_value < alpha
+
+    return {
+        "weekday_mean_minutes": round(weekday_listening.mean(), 2),
+        "weekend_mean_minutes": round(weekend_listening.mean(), 2),
+        "t_statistic": round(t_stat, 4),
+        "p_value": round(p_value, 4),
+        "significant": significant,
+        "interpretation": (
+            f"You listen significantly more on {'weekends' if weekend_listening.mean() > weekday_listening.mean() else 'weekdays'} "
+            f"(p={round(p_value, 4)}, α=0.05). This difference is unlikely to be due to chance."
+            if significant else
+            f"There is no statistically significant difference between your weekend and weekday listening "
+            f"(p={round(p_value, 4)}, α=0.05)."
+        )
+    }
+
+
+def get_listening_personality(df: pd.DataFrame) -> dict:
+    """
+    Generates a fun personality summary based on listening patterns.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+
+    Returns:
+        Dictionary of personality insights.
+    """
+    # Most loyal artist — most streamed overall
+    top_artist = df["artist"].value_counts().idxmax()
+
+    # Night owl score — % of listening between 10pm and 4am
+    night_hours = df[df["hour"].isin(range(22, 24)) | df["hour"].isin(range(0, 4))]
+    night_owl_score = round(len(night_hours) / len(df) * 100, 1)
+
+    # Peak hour
+    peak_hour = int(df["hour"].value_counts().idxmax())
+    peak_hour_label = f"{peak_hour}:00 - {peak_hour+1}:00"
+
+    # Most active month across all years
+    peak_month = df["month_name"].value_counts().idxmax()
+
+    # Skip tendency
+    overall_skip_rate = round(df["skipped"].sum() / len(df) * 100, 1)
+
+    return {
+        "most_loyal_artist": top_artist,
+        "night_owl_score": night_owl_score,
+        "peak_listening_hour": peak_hour_label,
+        "most_active_month": peak_month,
+        "overall_skip_rate": overall_skip_rate,
+        "listening_style": (
+            "Night Owl 🦉" if night_owl_score > 20
+            else "Early Bird 🐦" if peak_hour < 10
+            else "Daytime Listener ☀️"
+        )
+    }
