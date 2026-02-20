@@ -229,3 +229,137 @@ def get_listening_personality(df: pd.DataFrame) -> dict:
             else "Daytime Listener ☀️"
         )
     }
+
+def get_listening_streaks(df: pd.DataFrame) -> dict:
+    """
+    Calculates longest and current listening streaks in days.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+
+    Returns:
+        Dictionary with longest streak, current streak, and best streak dates.
+    """
+    active_dates = sorted(df["date"].unique())
+    active_dates = [pd.Timestamp(d) for d in active_dates]
+
+    if not active_dates:
+        return {"longest_streak": 0, "current_streak": 0, "best_streak_start": None, "best_streak_end": None}
+
+    longest = 1
+    current = 1
+    best_start = active_dates[0]
+    best_end = active_dates[0]
+    streak_start = active_dates[0]
+
+    for i in range(1, len(active_dates)):
+        diff = (active_dates[i] - active_dates[i - 1]).days
+        if diff == 1:
+            current += 1
+            if current > longest:
+                longest = current
+                best_start = streak_start
+                best_end = active_dates[i]
+        else:
+            current = 1
+            streak_start = active_dates[i]
+
+    # Calculate current streak from today backwards
+    today = pd.Timestamp.now(tz="UTC").normalize().tz_localize(None)
+    current_streak = 0
+    for d in reversed(active_dates):
+        expected = today - pd.Timedelta(days=current_streak)
+        if d == expected:
+            current_streak += 1
+        else:
+            break
+
+    return {
+        "longest_streak": longest,
+        "current_streak": current_streak,
+        "best_streak_start": str(best_start.date()),
+        "best_streak_end": str(best_end.date()),
+    }
+
+
+def get_monthly_breakdown(df: pd.DataFrame, year: int) -> pd.DataFrame:
+    """
+    Returns total minutes listened per month for a given year.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+        year: Year to filter by.
+
+    Returns:
+        DataFrame with month and total minutes, ordered Jan-Dec.
+    """
+    month_order = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+    ]
+
+    monthly = (
+        df[df["year"] == year]
+        .groupby("month_name")["minutes_played"]
+        .sum()
+        .reset_index()
+        .rename(columns={"minutes_played": "total_minutes"})
+    )
+
+    monthly["month_name"] = pd.Categorical(monthly["month_name"], categories=month_order, ordered=True)
+    return monthly.sort_values("month_name").reset_index(drop=True)
+
+
+def get_artist_loyalty_timeline(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Returns the top artist per year based on total minutes played.
+    Shows how listening taste evolved year over year.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+
+    Returns:
+        DataFrame with year, top artist, and minutes played.
+    """
+    return (
+        df.groupby(["year", "artist"])["minutes_played"]
+        .sum()
+        .reset_index()
+        .sort_values(["year", "minutes_played"], ascending=[True, False])
+        .groupby("year")
+        .first()
+        .reset_index()
+        .rename(columns={"minutes_played": "total_minutes"})
+    )
+
+
+def get_biggest_listening_day(df: pd.DataFrame) -> dict:
+    """
+    Finds the single day with the most listening time and
+    returns what was playing that day.
+
+    Args:
+        df: Cleaned streaming DataFrame.
+
+    Returns:
+        Dictionary with date, total minutes, and top tracks that day.
+    """
+    daily_totals = df.groupby("date")["minutes_played"].sum()
+    best_date = daily_totals.idxmax()
+    best_minutes = round(daily_totals.max(), 1)
+
+    top_tracks_that_day = (
+        df[df["date"] == best_date]
+        .groupby("track")["minutes_played"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(3)
+        .reset_index()
+    )
+
+    return {
+        "date": str(best_date),
+        "total_minutes": best_minutes,
+        "total_hours": round(best_minutes / 60, 1),
+        "top_tracks": top_tracks_that_day["track"].tolist(),
+    }
